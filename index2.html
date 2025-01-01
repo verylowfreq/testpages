@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+<head>
+
+</head>
+<body>
+    <h1>WebUSB Test page</h1>
+    <p><button onclick="connect_button()">Connect</button> <span id="connectionStatus"></span></p>
+    <p>GPIO control</p>
+    <p>GPIO 13 <button onclick="gpio_set_output(13, true);">HIGH</button> <button onclick="gpio_set_output(13, false);">LOW</button></p>
+    <p>LED illumination</p>
+    <p><button onclick="start_illumination_button()">Start</button></p>
+    <script>
+"use strict";
+
+// このVID/PIDはAdafruit_TinyUSBライブラリでデフォルトの値です。
+// 設定に応じて変更してください。
+const USBDeviceVID = 0x239a;
+const USBDevicePID = 0xcafe;
+
+// let webusb_device = null;
+
+const delay = (delay_msec) => {
+    return new Promise((resolve, reject) => {
+        setTimeout(() => {
+            resolve();
+        }, delay_msec);
+    });
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+
+});
+
+let webgpio = null;
+
+const connect_button = async () => {
+    webgpio = new WebGPIO();
+    await webgpio.connect(USBDeviceVID, USBDevicePID);
+};
+
+const gpio_set_output = async (pinNumber, level) => {
+    await webgpio.set_as_output(pinNumber);
+    await webgpio.write_output_level(pinNumber, level);
+};
+
+const start_illumination_button = async () => {
+    for (let i = 0; i < 22; i++) {
+        await webgpio.set_as_output(i);
+    }
+    while (webgpio.connected()) {
+        for (let i = 0; i < 22; i++) {
+            await webgpio.write_output_level(i, true);
+            await delay(100);
+            await webgpio.write_output_level(i, false);
+        }
+
+        for (let j = 0; j < 8; j++) {
+            for (let i = 0; i < 22; i++) {
+                await webgpio.write_output_level(i, j % 2 == 0);
+            }
+            await delay(200);
+        }
+    }
+};
+
+
+class WebGPIO {
+    constructor() {
+        this.usbdevice = null;
+        this.endpoint_out = -1;
+        this.endpoint_in = -1;
+        this.device_ready = false;
+    }
+
+    reset() {
+        if (!this.usbdevice) {
+            this.usbdevice.close();
+        }
+        this.usbdevice = null;
+        this.endpoint_out = -1;
+        this.endpoint_in = -1;
+        this.device_ready = false;
+    }
+    
+    async connect(vid, pid) {
+        let device = await navigator.usb.requestDevice({filters:[
+            { vendorId: vid, productId: pid }
+        ]});
+        await this._connect_internal(device);
+    }
+
+    async _connect_internal(usbdevice) {
+        await usbdevice.open();
+        await usbdevice.selectConfiguration(1);
+        let interfaceNumberToClaim = -1;
+        for (let i = 0; i < usbdevice.configuration.interfaces.length; i++) {
+            const curInterface = usbdevice.configuration.interfaces[i];
+            const interfaceClass = curInterface.alternate.interfaceClass;
+            
+            if (interfaceClass == 0xff) {
+                interfaceNumberToClaim = i;
+                for (let j = 0; j < curInterface.alternate.endpoints.length; j++) {
+                    const curEdpt = curInterface.alternate.endpoints[j];
+                    if (curEdpt.direction == 'out' && this.endpoint_out < 0) {
+                        this.endpoint_out = curEdpt.endpointNumber;
+                    }
+                    if (curEdpt.direction == 'in' && this.endpoint_in < 0) {
+                        this.endpoint_in = curEdpt.endpointNumber;
+                    }
+                }
+                break;
+            }
+        }
+        if (interfaceNumberToClaim < 0) {
+            throw "No vendor interface found.";
+        }
+        this.usbdevice = usbdevice;
+        await usbdevice.claimInterface(interfaceNumberToClaim);
+
+        this.device_ready = true;
+    }
+
+    connected() {
+        return this.device_ready;
+    }
+
+    async send_command(commandNumber, args) {
+        let data = new Uint8ClampedArray(1 + args.length);
+        data[0] = commandNumber;
+        for (let i = 0; i < args.length; i++) {
+            data[1 + i] = args[i];
+        }
+        await this.usbdevice.transferOut(this.endpoint_out, data);
+
+        return;
+    }
+
+    async send_command_and_get_response(commandNumber, args) {
+        await this.send_command(commandNumber, args);
+        for (let retry = 16; retry != 0; retry--) {
+            const result = await this.usbdevice.transferIn(this.endpoint_in, 64);
+            if (result.status == 'ok') {
+                return Array.from(new Uint8ClampedArray(result.data.buffer));
+            } else {
+                console.log("transferIn result = ", result.result, result);
+            }
+        }
+        return [];
+    }
+
+    async set_as_input(pinNumber, pullup = false) {
+        let command = 0x01;
+        let args = [ pinNumber, 0 ];
+        if (!pullup) {
+            args[1] = 0x00;
+        } else {
+            args[1] = 0x01;
+        }
+        await this.send_command(command, args)
+    }
+
+    async set_as_output(pinNumber) {
+        let command = 0x01;
+        let args = [ pinNumber, 0x02 ];
+        await this.send_command(command, args)
+    }
+
+    async write_output_level(pinNumber, level) {
+        let command = 0x02;
+        let args = [ pinNumber, level ? 0x01 : 0x00 ];
+        await this.send_command(command, args)
+    }
+
+    async read_input_level(pinNumber) {
+        let command = 0x03;
+        let args = [];
+        if (typeof(pinNumber) == 'number') {
+            args[0] = pinNumber;
+        } else if (Array.isArray(pinNumber)) {
+            args = pinNumber;
+        } else {
+            throw 'Invalid argument';
+        }
+        return await this.send_command_and_get_response(command, args);
+    }
+}
+
+
+    </script>
+</body>
+
+</html>
